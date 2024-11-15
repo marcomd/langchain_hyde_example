@@ -1,0 +1,34 @@
+[
+  {
+    "id": 1,
+    "content": "Scientific studies have shown that regular meditation practice reduces stress levels significantly. Research indicates a 30% decrease in cortisol levels among regular practitioners. Additionally, MRI scans show increased activity in areas of the brain associated with focus and emotional regulation."
+  },
+  {
+    "id": 2,
+    "content": "Regular meditation has been linked to improved sleep quality. A study of 500 participants showed that those who meditated for 20 minutes before bed fell asleep 15 minutes faster on average and reported better sleep quality scores."
+  },
+  {
+    "id": 3,
+    "content": "Long-term meditation practitioners demonstrate enhanced immune system function. Research shows increased levels of antibodies and improved inflammatory responses in those who meditate regularly."
+  },
+  {
+    "id": 4,
+    "content": "Meditation's impact on anxiety and depression has been well-documented. Clinical trials show it can be as effective as some medications for mild to moderate cases, particularly when combined with traditional therapy."
+  },
+  {
+    "id": 5,
+    "file": "documents/meditation-and-aging.md"
+  },
+  {
+    "id": 6,
+    "file": "documents/ai-can-meditate.pdf"
+  },
+  {
+    "id": 7,
+    "file": "documents/sexual-meditation.docx"
+  },
+  {
+    "id": 8,
+    "file": "documents/what-happens-when-you-meditate.html"
+  }
+]

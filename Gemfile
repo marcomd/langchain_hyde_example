@@ -1,5 +1,13 @@
 source 'https://rubygems.org'
 
-gem "debug"
-gem "langchainrb"
-gem "matrix"
+gem 'debug'
+gem 'langchainrb'
+gem 'matrix'
+gem 'pg'
+gem 'pgvector'
+gem 'sequel'
+gem 'faraday'
+gem 'csv'
+gem 'nokogiri'
+gem 'pdf-reader'
+gem 'docx'

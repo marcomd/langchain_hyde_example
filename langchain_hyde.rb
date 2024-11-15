@@ -1,23 +1,39 @@
 # frozen_string_literal: true
 
+require 'bundler/setup'
+require 'pg'
+require 'pgvector'
 require 'langchain'
 require 'matrix'
 require 'debug'
 require 'faraday'
+require 'csv'
+require 'nokogiri'
+require 'pdf-reader'
+require 'docx'
 
 class HydeRetriever
-  attr_reader :llm, :documents
+  attr_reader :llm, :documents, :vector_client, :vector_table, :root_path
 
   # Choose a model here https://github.com/ollama/ollama?tab=readme-ov-file#model-library
   MODEL = 'llama3.2'
 
-  def initialize
+  # Initialize the HyDE retriever
+  # @param erase [Boolean] Whether to erase existing vector DB data
+  def initialize(erase:)
     # Initialize Ollama LLM (make sure you have Ollama running locally)
     @llm ||= Langchain::LLM::Ollama.new(
       url: 'http://localhost:11434',
       default_options: { temperature: 0.1, chat_model: MODEL, completion_model: MODEL, embedding_model: MODEL }
     )
-    @documents = load_sample_documents
+    @vector_client = Langchain::Vectorsearch::Pgvector.new(
+      url: 'postgres://postgres:postgres@localhost:5432/langchain_hyde',
+      index_name: 'documents',
+      llm: @llm
+    )
+    @vector_table ||= prepare_vector_table(erase:)
+    @root_path = Pathname.new(Dir.pwd)
+    load_sample_documents
   end
 
   # Retrieve relevant documents for a given query
@@ -34,14 +50,14 @@ class HydeRetriever
     puts "--------------------------------"
     puts hypothetical_answer.completion
 
-    # Step 2: Use this hypothetical answer to find similar real documents
+    # Step 2: Use this hypothetical answer to find similar real documents with langchain similarity search
     # The embedding of the hypothetical answer helps find truly relevant content
-    relevant_docs = hyde_retrieve_documents(hypothetical_answer.completion)
+    relevant_docs = vector_client.similarity_search_with_hyde(query: hypothetical_answer.completion, k: top_k)
     puts "\n2. Retrieved relevant documents using HyDE:"
     puts "--------------------------------"
-    relevant_docs.each_with_index do |doc, i|
-      puts "\nDocument #{i + 1}: #{doc[:source]}"
-      puts doc[:content]
+    relevant_docs.each do |doc|
+      puts "\nDocument id #{doc.id}:"
+      puts doc.content
     end
 
     # Step 3: Generate final answer using retrieved documents
@@ -74,42 +90,13 @@ class HydeRetriever
     llm.complete(prompt: prompt)
   end
 
-  # Generate a hypothetical document based on a hypothetical answer
-  # @param hypothetical_answer [String] The hypothetical answer to generate a document for
-  # @return [Array<Float>] Similarity embeddings of the hypothetical answer
-  def hyde_retrieve_documents(hypothetical_answer, top_k: 3)
-    # Use the hypothetical answer's embedding to find similar real documents
-    hyde_embedding = simple_embedding(hypothetical_answer)
-
-    # Find similar documents using the hypothetical answer embedding
-    doc_embeddings = @documents.map do |doc|
-      {
-        id: doc[:id],
-        content: doc[:content],
-        source: doc[:source],
-        embedding: simple_embedding(doc[:content])
-      }
-    end
-
-    # Calculate similarities using the hypothetical answer as the reference
-    similarities = doc_embeddings.map do |doc|
-      similarity = cosine_similarity(hyde_embedding, doc[:embedding])
-      { similarity: similarity, document: doc }
-    end
-
-    similarities
-      .sort_by { |item| -item[:similarity] }
-      .take(top_k)
-      .map { |item| item[:document] }
-  end
-
   # Generate the final answer based on the query and relevant documents
   # @param query [String] The original query
   # @param relevant_docs [Array<Hash>] An array of relevant documents
   # @return [Langchain::Completion] The final answer
   def generate_final_answer(query, relevant_docs)
     context = relevant_docs.map do |doc|
-      "Source (#{doc[:source]}): #{doc[:content]}"
+      "Source (document id #{doc.id}): #{doc.content}"
     end.join("\n\n")
 
     prompt = <<~PROMPT
@@ -120,7 +107,7 @@ class HydeRetriever
 
       Requirements:
       1. Only use information from the provided sources
-      2. Cite the sources when making specific claims
+      2. Cite the document id as source, when making specific claims
       3. If the sources don't fully answer the question, acknowledge this
       
       Answer:
@@ -129,76 +116,68 @@ class HydeRetriever
     llm.complete(prompt: prompt)
   end
 
-  # Generate a simple embedding for a given text
-  # @param text [String] The text to generate an embedding for
-  # @return [Array<Float>] The embedding of the text
-  def simple_embedding(text)
-    # A simple TF-IDF like embedding approach
-    # In production, you'd want to use a proper embedding model
-    words = text.downcase.gsub(/[^a-z0-9\s]/, '').split
-    unique_words = words.uniq
+  # Load sample documents for demonstration
+  # @param erase [Boolean] Whether to erase existing documents
+  # @return [Array<Hash>] An array of sample documents
+  def load_sample_documents
+    return unless vector_table.count.zero?
 
-    # Create a basic numerical representation
-    unique_words.map do |word|
-      frequency = words.count(word)
-      frequency.to_f / words.length
+    documents_path = root_path.join("documents.json")
+    documents = JSON.parse(File.read(documents_path))
+
+    documents.each do |doc|
+      load_document_to_vector_table(doc)
     end
   end
 
-  # Load sample documents for demonstration
-  # @return [Array<Hash>] An array of sample documents
-  def load_sample_documents
-    [
-      {
-        id: 1,
-        content: "Scientific studies have shown that regular meditation practice reduces stress levels significantly. Research indicates a 30% decrease in cortisol levels among regular practitioners. Additionally, MRI scans show increased activity in areas of the brain associated with focus and emotional regulation.",
-        source: "Journal of Meditation Studies, 2023"
-      },
-      {
-        id: 2,
-        content: "Regular meditation has been linked to improved sleep quality. A study of 500 participants showed that those who meditated for 20 minutes before bed fell asleep 15 minutes faster on average and reported better sleep quality scores.",
-        source: "Sleep Research Institute, 2022"
-      },
-      {
-        id: 3,
-        content: "Long-term meditation practitioners demonstrate enhanced immune system function. Research shows increased levels of antibodies and improved inflammatory responses in those who meditate regularly.",
-        source: "Immunity & Health Journal, 2023"
-      },
-      {
-        id: 4,
-        content: "Meditation's impact on anxiety and depression has been well-documented. Clinical trials show it can be as effective as some medications for mild to moderate cases, particularly when combined with traditional therapy.",
-        source: "Mental Health Research Quarterly, 2023"
-      },
-    ]
+  # Load a document into the vector table based on its file path or content
+  # @param doc [Hash] The document to load
+  # @return [void]
+  def load_document_to_vector_table(doc)
+    if doc['file']
+      file_path = root_path.join(doc['file'])
+      vector_client.add_data(paths: [file_path])
+    elsif doc['content']
+      vector_client.add_texts(texts: [doc['content']])
+    end
   end
 
-  # Calculate cosine similarity between two vectors
-  # @param vec1 [Array<Float>] The first vector
-  # @param vec2 [Array<Float>] The second vector
-  # @return [Float] The cosine similarity between the two vectors
-  def cosine_similarity(vec1, vec2)
-    # Ensure vectors are of equal length by padding with zeros
-    max_length = [vec1.length, vec2.length].max
-    v1 = Vector.elements(vec1 + [0] * (max_length - vec1.length))
-    v2 = Vector.elements(vec2 + [0] * (max_length - vec2.length))
+  # Prepare the vector table for storing documents
+  # @param erase [Boolean] Whether to erase existing documents
+  # @return [Sequel::Dataset] The database table for storing documents
+  def prepare_vector_table(erase:)
+    db_table = vector_client.db.from(:documents)
 
-    # Calculate cosine similarity
-    dot_product = v1.inner_product(v2)
-    magnitude_product = v1.magnitude * v2.magnitude
+    begin
+      documents_count = db_table.count
 
-    # Avoid division by zero
-    return 0.0 if magnitude_product.zero?
-    dot_product / magnitude_product
+      if documents_count > 0 && erase
+        # Erase existing documents
+        vector_client.destroy_default_schema
+        vector_client.create_default_schema
+      end
+    rescue Sequel::DatabaseError => e
+      # Create the table if it doesn't exist
+      if e.message.include?('PG::UndefinedTable')
+        vector_client.create_default_schema
+      else
+        raise
+      end
+    end
+
+    db_table
   end
 end
 
 # Run the example
 # This example demonstrates how to use the HyDE retriever to retrieve relevant documents for a given query
 def demonstrate_hyde_rag
-  puts "Initializing HyDE-RAG system..."
-  hyde_retriever = HydeRetriever.new
+  # Get parameters from the command line
+  query = ARGV[0] || "What effect does meditation have on the brain and stress levels?"
+  erase = ARGV[1] == 'erase'
 
-  query = "What effect does meditation have on the brain and stress levels?"
+  puts "Initializing HyDE-RAG system..."
+  hyde_retriever = HydeRetriever.new(erase:)
 
   puts "\nDemonstrating HyDE-RAG process..."
   puts "=" * 50
